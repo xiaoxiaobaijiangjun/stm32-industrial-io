@@ -12,7 +12,7 @@ Industrial automation controller based on STM32F407 with Ethernet, RS485, and Mo
 - **RS485** half-duplex interface with DE/RE direction control
 - **Ethernet** 10/100M RMII with built-in MAC (external PHY: LAN8720/DP83848)
 - **Modbus RTU** (slave) over RS485
-- **Modbus TCP** (server) over Ethernet, port 502
+- **Ethernet Modbus frame** processing (MBAP+PDU over raw Ethernet frames, no TCP/IP stack — not a standard Modbus TCP server)
 
 ## Modbus Register Map
 
@@ -64,7 +64,7 @@ Tags starting with `v` trigger a release with firmware artifacts.
 | DI4    | PE4  | DO4    | PB8  |
 | DI5    | PE5  | DO5    | PB9  |
 | DI6    | PE6  | DO6    | PB10 |
-| DI7    | PE7  | DO7    | PB12 |
+| DI7    | PE7  | DO7    | PB14 |
 
 ### Analog I/O
 | Signal | Pin     | ADC Channel  |
