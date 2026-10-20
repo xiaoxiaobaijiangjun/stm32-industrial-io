@@ -1,156 +1,60 @@
-# STM32 Automation Board
+# stm32-industrial-io
 
-Industrial automation controller based on STM32F407 with Ethernet, RS485, and Modbus protocol support.
+一块工业自动化 IO 控制板的固件。工业现场有大量开关量和模拟量要接入控制系统——传感器的通断、阀门的开闭、0-10V 的压力变送信号——这块板子就是现场的 IO 接入层：下接 8 路光耦隔离数字输入、8 路数字输出、4 路模拟输入、2 路模拟输出、4 路继电器，上通过 RS485（Modbus RTU 从站）或以太网与上位机/PLC 通信。
 
-## Features
+固件基于一个上游开源工程二次开发，我在其基础上做了 RTOS 化改造和通信可靠性工作，具体见下面各节和提交记录。
 
-- **8 Digital Inputs** (opto-isolated, active-low, with software debouncing)
-- **8 Digital Outputs** (push-pull, high-side drive)
-- **4 Analog Inputs** (12-bit ADC, 0-10V range)
-- **2 Analog Outputs** (12-bit DAC, 0-10V range)
-- **4 Relays** with individual LED status indicators
-- **RS485** half-duplex interface with DE/RE direction control
-- **Ethernet** 10/100M RMII with built-in MAC (external PHY: LAN8720/DP83848)
-- **Modbus RTU** (slave) over RS485
-- **Ethernet Modbus frame** processing (MBAP+PDU over raw Ethernet frames, no TCP/IP stack — not a standard Modbus TCP server)
+## 为什么改成 FreeRTOS 三任务
 
-## Modbus Register Map
+上游固件是裸机大循环。实际用下来有两个问题：IO 扫描周期跟着主循环里的耗时任务抖动，RS485 和以太网两条链路互相抢时间。改造后拆成三个任务：
 
-| Type               | Address Range | Description               |
-|---------------------|---------------|---------------------------|
-| Coils (0x)          | 0-7           | Digital outputs DO0-DO7   |
-| Coils (0x)          | 8-11          | Relays 1-4                |
-| Discrete Inputs (1x)| 0-7           | Digital inputs DI0-DI7    |
-| Input Registers (3x)| 0-3           | Analog inputs (raw ADC)   |
-| Holding Registers (4x)| 0-1         | Analog outputs (raw DAC)  |
-| Holding Registers (4x)| 100-103     | Analog inputs (mirrored)  |
+- IO 扫描任务，`vTaskDelayUntil` 保证 10ms 精确周期，优先级最高
+- RS485 通信任务，处理 Modbus RTU 请求
+- 以太网通信任务，处理以太网帧里的 Modbus 报文
 
-## Building
+FreeRTOS V11 官方 Cortex-M4F 移植，SysTick 同时兼作内核 tick 和 HAL 时基（这里踩过死锁的坑，见提交记录），Heap_4 内存管理，开了栈溢出检测。
 
-### Prerequisites
+## RS485 判帧：从轮询到 IDLE 中断
 
-- ARM GCC Toolchain (`arm-none-eabi-gcc` 12.3+)
-- CMake 3.20+
-- STM32CubeF4 HAL library (downloaded automatically in CI)
+Modbus RTU 靠帧间空闲区分报文，判帧不准整条链路就废。最初用定时轮询检查字节间隙，9600bps 下能跑，升到 115200bps 后间隙判断跟不上，丢帧严重。最终改成 UART IDLE 空闲中断判帧：一帧数据收完线路空闲，硬件置 IDLE 标志，中断里切帧，软件完全不参与计时。改完后 115200bps 下用 Modbus Poll 对 8 种功能码（01/02/03/04/05/06/0F/10）逐个读写测试，全部通过。
 
-### Local Build
+CRC16 校验用查表法。表不是手抄的，是上电时由 0xA001 多项式循环生成——查表和位移两种实现都验证过一致，生成式查表两头的好处都拿到了。
 
-```bash
-git clone https://github.com/your-org/stm32_automation_board.git
-cd stm32_automation_board
+## 可靠性三件套
 
-# Download STM32CubeF4 HAL
-./scripts/fetch_hal.sh
+现场设备不是 demo 板，最后补了三个工业场景必需的东西：
 
-# Build
-cmake -B build -DCMAKE_TOOLCHAIN_FILE=cmake/arm-none-eabi-gcc.cmake -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(nproc)
-```
+- 通信看门狗：主站轮询中断超时后输出回安全态，防止上位机死掉后执行器保持上次动作
+- 掉电参数保持：关键配置写 Flash，断电重启不丢
+- DI 软件消抖：光耦输入的毛刺在软件里二次过滤
 
-### CI/CD
+## Modbus 寄存器映射
 
-GitHub Actions automatically builds on push/PR to `main`/`master`. 
-Tags starting with `v` trigger a release with firmware artifacts.
+| 类型 | 地址 | 内容 |
+|---|---|---|
+| 线圈 | 0-7 | 数字输出 DO0-DO7 |
+| 线圈 | 8-11 | 继电器 1-4 |
+| 离散输入 | 0-7 | 数字输入 DI0-DI7 |
+| 输入寄存器 | 0-3 | 模拟输入（原始 ADC 值） |
+| 保持寄存器 | 0-1 | 模拟输出（DAC 值） |
+| 保持寄存器 | 100-103 | 模拟输入（镜像） |
 
-## Pin Assignments
+说明一点：以太网链路是裸以太网帧直接装 MBAP+PDU，没有跑 TCP/IP 协议栈，不是标准的 Modbus TCP 服务端。
 
-### Digital I/O
-| Signal | Pin  | Signal | Pin  |
+## 引脚分配
+
+| 信号 | 引脚 | 信号 | 引脚 |
 |--------|------|--------|------|
-| DI0    | PE0  | DO0    | PB0  |
-| DI1    | PE1  | DO1    | PB1  |
-| DI2    | PE2  | DO2    | PB5  |
-| DI3    | PE3  | DO3    | PB6  |
-| DI4    | PE4  | DO4    | PB8  |
-| DI5    | PE5  | DO5    | PB9  |
-| DI6    | PE6  | DO6    | PB10 |
-| DI7    | PE7  | DO7    | PB14 |
+| DI0-DI7 | PE0-PE7 | DO0-DO7 | PB0/PB1/PB5/PB6/PB8/PB9/PB10/PB14 |
+| AI0-AI3 | PA0、PC0、PC2、PC3 | AO0/AO1 | PA4、PA5 |
+| 继电器 1-4 | PC8-PC11（LED 在 PD0-PD3） | RS485 | USART2：PD5 TX / PD6 RX / PD7 DE |
 
-### Analog I/O
-| Signal | Pin     | ADC Channel  |
-|--------|---------|-------------|
-| AI0    | PA0     | ADC1_IN0    |
-| AI1    | PC0     | ADC1_IN10   |
-| AI2    | PC2     | ADC1_IN12   |
-| AI3    | PC3     | ADC1_IN13   |
-| AO0    | PA4     | DAC_OUT1    |
-| AO1    | PA5     | DAC_OUT2    |
+以太网 RMII + 外部 PHY（LAN8720/DP83848）：REF_CLK PA1、MDIO PA2、CRS_DV PA7、MDC PC1、RXD0/RXD1 PC4/PC5、TX_EN PB11、TXD0/TXD1 PB12/PB13。
 
-### Relays
-| Relay | Coil Pin | LED Pin |
-|-------|----------|---------|
-| 1     | PC8      | PD0     |
-| 2     | PC9      | PD1     |
-| 3     | PC10     | PD2     |
-| 4     | PC11     | PD3     |
+## 编译
 
-### Communication
-| Signal   | Pin  | Function        |
-|----------|------|-----------------|
-| RS485 TX | PD5  | USART2_TX       |
-| RS485 RX | PD6  | USART2_RX       |
-| RS485 DE | PD7  | Direction ctrl  |
-
-### Ethernet (RMII)
-| Signal      | Pin  |
-|-------------|------|
-| REF_CLK     | PA1  |
-| MDIO        | PA2  |
-| CRS_DV      | PA7  |
-| MDC         | PC1  |
-| RXD0        | PC4  |
-| RXD1        | PC5  |
-| TX_EN       | PB11 |
-| TXD0        | PB12 |
-| TXD1        | PB13 |
-
-## Flashing
-
-### Option 1: STM32CubeProgrammer (CLI)
-
-```bash
-# Download from https://www.st.com/en/development-tools/stm32cubeprog.html
-
-# Flash via ST-Link
-STM32_Programmer_CLI -c port=SWD -w build/stm32_automation_board.hex -v
-
-# Flash via UART (bootloader)
-STM32_Programmer_CLI -c port=COM3 br=115200 -w build/stm32_automation_board.hex -v
-```
-
-### Option 2: OpenOCD + ST-Link
-
-```bash
-# Install OpenOCD (Ubuntu/Debian)
-sudo apt-get install openocd
-
-# Connect ST-Link and flash
-openocd -f openocd.cfg -c "program build/stm32_automation_board.hex verify reset exit"
-```
-
-### Option 3: STM32 ST-LINK Utility (Windows)
-
-1. Download [ST-LINK Utility](https://www.st.com/en/development-tools/stsw-link004.html)
-2. Connect ST-Link to the board
-3. Target → Connect
-4. Target → Program & Verify → select `build/stm32_automation_board.hex`
-
-### Entering Bootloader (for UART flash)
-
-1. Set BOOT0 pin HIGH, BOOT1 pin LOW
-2. Reset the MCU
-3. Connect USART1 (PA9=TX, PA10=RX) via USB-UART adapter
-4. Flash via STM32CubeProgrammer or `stm32flash`
-5. Set BOOT0 LOW and reset to run firmware
+Keil MDK 打开 `MDK-ARM` 下的工程直接编译烧录（开发环境 MDK 5.36）。仓库里另保留了上游的 CMake 工程文件，但当前 FreeRTOS 版本只在 Keil 工程里维护。
 
 ## License
 
 MIT
-
----
-
-## 相关
-
-- [[RESUME_SUMMARY]] ——工程 README（功能/引脚/寄存器）与简历归纳同仓库两用
-- [[控制板讲稿]] ——讲稿开篇注明素材来自本工程归纳，架构段事实核对处
-- [[控制板问答笔记]] ——问答笔记源材料链到本工程的任务架构/寄存器映射
