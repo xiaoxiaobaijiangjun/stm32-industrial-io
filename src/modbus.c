@@ -2,6 +2,7 @@
 #include "digital_io.h"
 #include "analog_io.h"
 #include "relay.h"
+#include "industrial.h"
 
 static uint8_t modbus_slave_id = 1;
 static uint16_t holding_regs[MODBUS_MAX_REGISTERS] = {0};
@@ -86,18 +87,21 @@ static void modbus_regs_write(uint16_t *regs, uint16_t addr, uint16_t value)
 
 static void modbus_sync_registers(void)
 {
-    /* Synchronize hardware I/O with Modbus register map */
+    /* Synchronize hardware I/O with Modbus register map.
+     * While the comm watchdog forces the safe state, output writes are
+     * suppressed (recovery re-syncs from the coil table). */
+    if (!ind_output_override_active()) {
+        /* Digital outputs -> Coils 0-7 */
+        for (uint8_t i = 0; i < DO_COUNT; i++) {
+            uint8_t state = modbus_bit_read(coil_bits, MODBUS_COIL_OFFSET + i);
+            digital_output_write(i, state);
+        }
 
-    /* Digital outputs -> Coils 0-7 */
-    for (uint8_t i = 0; i < DO_COUNT; i++) {
-        uint8_t state = modbus_bit_read(coil_bits, MODBUS_COIL_OFFSET + i);
-        digital_output_write(i, state);
-    }
-
-    /* Relays -> Coils 8-11 */
-    for (uint8_t i = 0; i < RELAY_COUNT; i++) {
-        uint8_t state = modbus_bit_read(coil_bits, MODBUS_COIL_OFFSET + 8 + i);
-        relay_set(i, state);
+        /* Relays -> Coils 8-11 */
+        for (uint8_t i = 0; i < RELAY_COUNT; i++) {
+            uint8_t state = modbus_bit_read(coil_bits, MODBUS_COIL_OFFSET + 8 + i);
+            relay_set(i, state);
+        }
     }
 
     /* Digital inputs -> Discrete inputs 0-7 */
@@ -121,6 +125,12 @@ static void modbus_sync_registers(void)
     }
 }
 
+/* Public: re-push the coil table to the outputs (comm-watchdog recovery). */
+void modbus_sync_outputs(void)
+{
+    modbus_sync_registers();
+}
+
 /* ============================================================
  * Modbus RTU Frame Processing
  * ============================================================ */
@@ -129,9 +139,12 @@ modbus_status_t modbus_rtu_process(uint8_t *rx_buf, uint16_t rx_len,
 {
     if (rx_len < 4) return MODBUS_ERROR;
 
-    uint16_t rx_crc = ((uint16_t)rx_buf[rx_len - 1] << 8) | rx_buf[rx_len - 2];
     uint16_t calc_crc = modbus_crc16(rx_buf, rx_len - 2);
-    if (rx_crc != calc_crc) return MODBUS_CRC_ERROR;
+    uint16_t sent_crc = ((uint16_t)rx_buf[rx_len - 1] << 8) | rx_buf[rx_len - 2];
+    if (sent_crc != calc_crc) {
+        ind_on_crc_error();
+        return MODBUS_CRC_ERROR;
+    }
 
     uint8_t slave_addr = rx_buf[0];
     uint8_t func_code  = rx_buf[1];
@@ -139,6 +152,9 @@ modbus_status_t modbus_rtu_process(uint8_t *rx_buf, uint16_t rx_len,
     if (slave_addr != modbus_slave_id && slave_addr != 0) {
         return MODBUS_OK; /* Not for us */
     }
+
+    /* valid frame addressed to this device (any link): comm watchdog kick */
+    ind_comm_kick();
 
     *tx_len  = 0;
     tx_buf[0] = modbus_slave_id;
@@ -181,6 +197,26 @@ modbus_status_t modbus_rtu_process(uint8_t *rx_buf, uint16_t rx_len,
     }
     case MODBUS_FC_READ_HOLDING_REGISTERS:
     case MODBUS_FC_READ_INPUT_REGISTERS: {
+        if (func_code == MODBUS_FC_READ_HOLDING_REGISTERS) {
+            uint16_t cfg_vals[MODBUS_RTU_FRAME_MAX / 2];
+            uint8_t r = ind_regs_read(start_addr, quantity, cfg_vals);
+            if (r == 2U) {
+                tx_buf[1] |= 0x80;
+                tx_buf[2]  = MODBUS_EXC_ILLEGAL_DATA_ADDRESS;
+                resp_len   = 3;
+                break;
+            }
+            if (r == 1U) {
+                uint8_t bc = quantity * 2U;
+                tx_buf[2] = bc;
+                for (uint16_t i = 0; i < quantity; i++) {
+                    tx_buf[3 + i * 2]     = cfg_vals[i] >> 8;
+                    tx_buf[3 + i * 2 + 1] = cfg_vals[i] & 0xFF;
+                }
+                resp_len = 3 + bc;
+                break;
+            }
+        }
         if (start_addr + quantity > MODBUS_MAX_REGISTERS) {
             tx_buf[1] |= 0x80;
             tx_buf[2]  = MODBUS_EXC_ILLEGAL_DATA_ADDRESS;
@@ -215,7 +251,24 @@ modbus_status_t modbus_rtu_process(uint8_t *rx_buf, uint16_t rx_len,
     }
     case MODBUS_FC_WRITE_SINGLE_REGISTER: {
         uint16_t reg_val = quantity;
-        modbus_regs_write(holding_regs, MODBUS_HOLDING_REG_OFFSET + start_addr, reg_val);
+        uint8_t wv = ind_reg_validate(start_addr, reg_val);
+        if (wv == 2U) {
+            tx_buf[1] |= 0x80;
+            tx_buf[2]  = MODBUS_EXC_ILLEGAL_DATA_VALUE;
+            resp_len   = 3;
+            break;
+        }
+        if (wv == 1U) {
+            /* flash save failure is a device fault, not an address error */
+            if (ind_reg_write(start_addr, reg_val) == 2U) {
+                tx_buf[1] |= 0x80;
+                tx_buf[2]  = MODBUS_EXC_SLAVE_DEVICE_FAILURE;
+                resp_len   = 3;
+                break;
+            }
+        } else {
+            modbus_regs_write(holding_regs, MODBUS_HOLDING_REG_OFFSET + start_addr, reg_val);
+        }
         modbus_sync_registers();
         tx_buf[2] = rx_buf[2];
         tx_buf[3] = rx_buf[3];
@@ -245,16 +298,32 @@ modbus_status_t modbus_rtu_process(uint8_t *rx_buf, uint16_t rx_len,
         break;
     }
     case MODBUS_FC_WRITE_MULTIPLE_REGISTERS: {
-        if (start_addr + quantity > MODBUS_MAX_REGISTERS) {
+        uint8_t reject = 0U;
+        /* validate the whole request first: plain registers OR the industrial
+         * config area; holes / read-only / bad values reject ATOMICALLY
+         * (nothing is written for a rejected frame) */
+        if ((7U + (uint32_t)quantity * 2U + 2U) > rx_len) {
+            reject = 1U;
+        }
+        for (uint16_t i = 0U; (i < quantity) && !reject; i++) {
+            uint16_t a = start_addr + i;
+            uint16_t val = ((uint16_t)rx_buf[7 + i * 2] << 8) | rx_buf[7 + i * 2 + 1];
+            uint8_t wv = ind_reg_validate(a, val);
+            if (wv == 2U || (wv == 0U && a >= MODBUS_MAX_REGISTERS)) {
+                reject = 1U;
+            }
+        }
+        if (reject) {
             tx_buf[1] |= 0x80;
             tx_buf[2]  = MODBUS_EXC_ILLEGAL_DATA_ADDRESS;
             resp_len   = 3;
             break;
         }
-        (void)rx_buf[6]; /* byte_count validated by quantity check above */
-        for (uint16_t i = 0; i < quantity; i++) {
+        for (uint16_t i = 0U; i < quantity; i++) {
             uint16_t val = ((uint16_t)rx_buf[7 + i * 2] << 8) | rx_buf[7 + i * 2 + 1];
-            modbus_regs_write(holding_regs, MODBUS_HOLDING_REG_OFFSET + start_addr + i, val);
+            if (ind_reg_write(start_addr + i, val) == 0U) {
+                modbus_regs_write(holding_regs, MODBUS_HOLDING_REG_OFFSET + start_addr + i, val);
+            }
         }
         modbus_sync_registers();
         tx_buf[2] = rx_buf[2];

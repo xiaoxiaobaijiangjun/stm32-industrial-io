@@ -53,6 +53,7 @@ void modbus_rtu_init(uint8_t slave_id);
 modbus_status_t modbus_rtu_process(uint8_t *rx_buf, uint16_t rx_len,
                                     uint8_t *tx_buf, uint16_t *tx_len);
 uint16_t modbus_crc16(uint8_t *buf, uint16_t len);
+void modbus_sync_outputs(void);   /* push the coil table to DO/relays */
 
 uint16_t modbus_read_coil(uint16_t addr);
 void modbus_write_coil(uint16_t addr, uint16_t value);

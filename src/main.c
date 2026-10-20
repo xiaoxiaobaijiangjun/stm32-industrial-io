@@ -1,6 +1,7 @@
 #include "main.h"
 #include "FreeRTOS.h"
 #include "task.h"
+#include "industrial.h"
 
 volatile uint32_t sys_tick = 0;
 
@@ -40,6 +41,13 @@ void HAL_Delay(uint32_t delay)
 void vApplicationTickHook(void)
 {
     sys_tick++;
+}
+
+void vApplicationIdleHook(void)
+{
+    /* track the minimum remaining idle-task stack for the 24 h report
+     * (Modbus stats register 0x2016-17) */
+    ind_idle_hook((uint32_t)uxTaskGetStackHighWaterMark(NULL));
 }
 
 void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
@@ -93,10 +101,15 @@ int main(void)
     relays_init();
     analog_inputs_init();
     analog_outputs_init();
-    rs485_init(RS485_BAUDRATE);
+
+    /* industrial trio: loads params from flash (or defaults) and snapshots
+     * the reset cause BEFORE any comm starts; comm links use the stored
+     * slave id / baudrate */
+    industrial_init();
+    rs485_init(industrial_baud());
     ethernet_init();
 
-    modbus_rtu_init(MODBUS_RTU_ADDRESS);
+    modbus_rtu_init(industrial_slave_id());
     modbus_tcp_init(MODBUS_SLAVE_ID);
 
     rs485_set_rx_callback(rs485_modbus_rx_callback);
@@ -121,6 +134,7 @@ static void io_scan_task(void *arg)
 
     for (;;) {
         digital_inputs_scan();
+        ind_watchdog_service();   /* comm watchdog: safe state on timeout */
 
         uint16_t ai_buf[AI_COUNT];
         analog_inputs_scan_all(ai_buf);

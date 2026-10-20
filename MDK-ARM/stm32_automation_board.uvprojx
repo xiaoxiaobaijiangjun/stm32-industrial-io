@@ -429,6 +429,11 @@
               <FilePath>..\src\modbus.c</FilePath>
             </File>
             <File>
+              <FileName>industrial.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\src\industrial.c</FilePath>
+            </File>
+            <File>
               <FileName>modbus_tcp.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\src\modbus_tcp.c</FilePath>
