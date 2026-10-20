@@ -1,0 +1,225 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "Modbus 写线圈点亮继电器 · 调用链",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "column_fit": "spread",
+    "viewBox": [
+      1040,
+      660
+    ],
+    "views": [
+      {
+        "id": "downlink",
+        "label": "下行写请求",
+        "focus": [
+          "scada",
+          "tcp",
+          "core",
+          "regs"
+        ],
+        "note": "MBAP 剥离后复用 RTU 处理器，写线圈到寄存器表。"
+      },
+      {
+        "id": "hw-sync",
+        "label": "周期同步到硬件",
+        "focus": [
+          "ioscan",
+          "regs",
+          "relay"
+        ],
+        "note": "IO_Scan 任务 10ms 周期把线圈状态同步到继电器。"
+      }
+    ]
+  },
+  "participants": [
+    {
+      "id": "scada",
+      "type": "external",
+      "label": "SCADA 主站",
+      "sublabel": "Modbus 客户端"
+    },
+    {
+      "id": "tcp",
+      "type": "backend",
+      "label": "Modbus TCP",
+      "sublabel": "ethernet_task :502"
+    },
+    {
+      "id": "core",
+      "type": "backend",
+      "label": "Modbus 核心",
+      "sublabel": "CRC16 · 功能码"
+    },
+    {
+      "id": "regs",
+      "type": "database",
+      "label": "寄存器表",
+      "sublabel": "coil_bits / holding_regs"
+    },
+    {
+      "id": "ioscan",
+      "type": "backend",
+      "label": "IO_Scan 任务",
+      "sublabel": "FreeRTOS · 10ms"
+    },
+    {
+      "id": "relay",
+      "type": "backend",
+      "label": "继电器驱动",
+      "sublabel": "relay_set + LED"
+    }
+  ],
+  "segments": [
+    {
+      "from": 160,
+      "to": 398,
+      "label": "下行写请求（以太网）"
+    },
+    {
+      "from": 408,
+      "to": 580,
+      "label": "周期同步到硬件"
+    }
+  ],
+  "messages": [
+    {
+      "id": "write-coil",
+      "from": "scada",
+      "to": "tcp",
+      "y": 185,
+      "label": "Write Single Coil",
+      "note": "功能码 05H · coil 8（继电器1）· MBAP",
+      "variant": "default"
+    },
+    {
+      "id": "strip-mbap",
+      "from": "tcp",
+      "to": "core",
+      "y": 228,
+      "label": "剥离 MBAP → PDU",
+      "note": "暂存事务 ID",
+      "variant": "default"
+    },
+    {
+      "id": "write-bit",
+      "from": "core",
+      "to": "regs",
+      "y": 268,
+      "label": "写 coil_bits[8] = 1",
+      "note": "CRC16 通过 · 地址匹配",
+      "variant": "emphasis"
+    },
+    {
+      "id": "build-pdu",
+      "from": "core",
+      "to": "tcp",
+      "y": 308,
+      "label": "响应 PDU（回显）",
+      "variant": "return"
+    },
+    {
+      "id": "mbap-reply",
+      "from": "tcp",
+      "to": "scada",
+      "y": 348,
+      "label": "MBAP 响应 · 事务ID 匹配",
+      "variant": "return"
+    },
+    {
+      "id": "sync-call",
+      "from": "ioscan",
+      "to": "regs",
+      "y": 445,
+      "label": "modbus_sync_registers()",
+      "note": "vTaskDelayUntil · 10ms 周期",
+      "variant": "dashed"
+    },
+    {
+      "id": "read-coil",
+      "from": "regs",
+      "to": "ioscan",
+      "y": 482,
+      "label": "coil_bits[8] = 1",
+      "variant": "return"
+    },
+    {
+      "id": "relay-on",
+      "from": "ioscan",
+      "to": "relay",
+      "y": 524,
+      "label": "relay_set(1, ON)",
+      "note": "BSRR 置位 · LED 联动",
+      "variant": "emphasis"
+    }
+  ],
+  "activations": [
+    {
+      "participant": "scada",
+      "from": 180,
+      "to": 354,
+      "type": "external"
+    },
+    {
+      "participant": "tcp",
+      "from": 180,
+      "to": 354,
+      "type": "backend"
+    },
+    {
+      "participant": "core",
+      "from": 223,
+      "to": 314,
+      "type": "backend"
+    },
+    {
+      "participant": "regs",
+      "from": 263,
+      "to": 488,
+      "type": "database"
+    },
+    {
+      "participant": "ioscan",
+      "from": 440,
+      "to": 530,
+      "type": "backend"
+    },
+    {
+      "participant": "relay",
+      "from": 519,
+      "to": 534,
+      "type": "backend"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "emerald",
+      "title": "请求 / 响应配对",
+      "items": [
+        "写请求与 MBAP 响应按事务 ID 配对",
+        "响应 PDU 由协议核心直接回显构造",
+        "上层响应不依赖硬件动作完成"
+      ]
+    },
+    {
+      "dot": "cyan",
+      "title": "协议复用",
+      "items": [
+        "TCP 侧剥离 MBAP 后复用 RTU 处理器",
+        "CRC16 查表校验通过才写寄存器",
+        "两条链路的写操作在寄存器表汇合"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "软硬解耦",
+      "items": [
+        "寄存器写入与硬件动作解耦",
+        "IO_Scan 任务 10ms 周期统一同步",
+        "继电器动作带 LED 联动便于现场确认"
+      ]
+    }
+  ]
+}

@@ -20,3 +20,14 @@ build/
 .vscode/
 .idea/
 *.bak
+
+# Keil 编译产物与编辑器缓存
+MDK-ARM/Objects/
+MDK-ARM/Listings/
+MDK-ARM/DebugConfig/
+MDK-ARM/.kilo/
+__pycache__/
+*.pyc
+
+# 面试准备材料仅本地保留，不进仓库
+RESUME_SUMMARY.md

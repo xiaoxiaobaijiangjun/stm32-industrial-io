@@ -1,0 +1,227 @@
+{
+  "schema_version": 1,
+  "diagram_type": "lifecycle",
+  "meta": {
+    "title": "RS485 DE/RE 方向切换状态机",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "main-cycle",
+        "label": "收发循环",
+        "focus": [
+          "rx_listen",
+          "frame_ready",
+          "need_reply",
+          "tx_send",
+          "switch_rx"
+        ],
+        "note": "半双工总线上从监听、判帧到发送再切回接收的完整循环。"
+      },
+      {
+        "id": "silent-path",
+        "label": "静默丢弃",
+        "focus": [
+          "need_reply",
+          "silent_drop",
+          "rx_listen"
+        ],
+        "note": "CRC 或地址校验失败时按 Modbus 规范静默，不发任何响应。"
+      }
+    ]
+  },
+  "lanes": [
+    {
+      "id": "main",
+      "label": "收发主循环"
+    },
+    {
+      "id": "exceptions",
+      "label": "异常处理"
+    }
+  ],
+  "states": [
+    {
+      "id": "rx_listen",
+      "type": "start",
+      "label": "RX 监听",
+      "sublabel": "DE=0 · RXNE 入环形缓冲",
+      "lane": "main",
+      "col": 0,
+      "step": "01",
+      "tag": "常态"
+    },
+    {
+      "id": "frame_ready",
+      "type": "active",
+      "label": "帧就绪",
+      "sublabel": "IDLE 中断 · frame_ready=1",
+      "lane": "main",
+      "col": 1,
+      "step": "02"
+    },
+    {
+      "id": "need_reply",
+      "type": "decision",
+      "label": "需要应答?",
+      "sublabel": "rs485_process ≥8 字节",
+      "lane": "main",
+      "col": 2,
+      "step": "03",
+      "tag": "判帧"
+    },
+    {
+      "id": "tx_send",
+      "type": "active",
+      "label": "TX 发送",
+      "sublabel": "DE=1 · HAL_UART_Transmit",
+      "lane": "main",
+      "col": 3,
+      "step": "04",
+      "tag": "独占总线"
+    },
+    {
+      "id": "switch_rx",
+      "type": "success",
+      "label": "切回 RX",
+      "sublabel": "DE=0 · 无论成败",
+      "lane": "main",
+      "col": 4,
+      "step": "05"
+    },
+    {
+      "id": "silent_drop",
+      "type": "failure",
+      "label": "静默丢弃",
+      "sublabel": "CRC 错 / 非本机地址",
+      "lane": "exceptions",
+      "col": 1,
+      "tag": "Modbus 规范"
+    }
+  ],
+  "transitions": [
+    {
+      "id": "rx-frame",
+      "from": "rx_listen",
+      "to": "frame_ready",
+      "label": "空闲 1 字节时间",
+      "labelAt": [
+        171,
+        202
+      ],
+      "route": "straight"
+    },
+    {
+      "id": "frame-decide",
+      "from": "frame_ready",
+      "to": "need_reply",
+      "label": "rs485_process()",
+      "labelAt": [
+        325,
+        202
+      ],
+      "route": "straight"
+    },
+    {
+      "id": "decide-tx",
+      "from": "need_reply",
+      "to": "tx_send",
+      "label": "rs485_send()",
+      "labelAt": [
+        479,
+        115
+      ],
+      "variant": "emphasis",
+      "route": "straight"
+    },
+    {
+      "id": "tx-switch",
+      "from": "tx_send",
+      "to": "switch_rx",
+      "label": "发送返回 · RX_ENABLE",
+      "labelAt": [
+        633,
+        202
+      ],
+      "variant": "emphasis",
+      "route": "straight"
+    },
+    {
+      "id": "decide-silent",
+      "from": "need_reply",
+      "to": "silent_drop",
+      "label": "校验失败",
+      "variant": "security",
+      "labelAt": [
+        402,
+        233
+      ]
+    },
+    {
+      "id": "silent-rx",
+      "from": "silent_drop",
+      "to": "rx_listen",
+      "label": "恢复监听",
+      "labelAt": [
+        300,
+        364
+      ],
+      "fromSide": "bottom",
+      "toSide": "bottom",
+      "via": [
+        [
+          556,
+          350
+        ],
+        [
+          94,
+          350
+        ]
+      ],
+      "variant": "security"
+    },
+    {
+      "id": "switch-rx-loop",
+      "from": "switch_rx",
+      "to": "rx_listen",
+      "label": "继续监听 · 下一帧",
+      "labelAt": [
+        400,
+        70
+      ],
+      "fromSide": "top",
+      "toSide": "top",
+      "route": "top-channel",
+      "variant": "emphasis"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "半双工规则",
+      "items": [
+        "DE=1 发送、DE=0 接收，同一时刻只能单向",
+        "发送前后由 rs485_send 自动切换方向",
+        "总线上同一时刻只允许一个发送者"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "判帧与校验",
+      "items": [
+        "IDLE 中断判定帧结束，避免固定字节数拆帧",
+        "最短合法帧 8 字节，不足视为线路噪声",
+        "CRC16 查表校验 + 从机地址过滤，失败静默"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "无条件切回",
+      "items": [
+        "发送完成后立即恢复接收方向",
+        "发送超时也同样切回，避免总线卡死",
+        "静默丢弃后直接回到监听态"
+      ]
+    }
+  ]
+}

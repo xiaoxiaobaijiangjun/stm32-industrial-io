@@ -1,0 +1,259 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "STM32F407 工业控制板系统架构",
+    "locale": "zh-CN",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "comms-paths",
+        "label": "双通信链路",
+        "focus": [
+          "scada",
+          "tcp",
+          "rtu",
+          "core",
+          "regs"
+        ],
+        "note": "Modbus TCP 与 RTU 两条链路共用同一个协议核心。"
+      },
+      {
+        "id": "io-sync",
+        "label": "IO 同步",
+        "focus": [
+          "regs",
+          "dio",
+          "relay",
+          "aio"
+        ],
+        "note": "寄存器表 10ms 周期同步到数字量、继电器与模拟量外设。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "scada",
+      "type": "external",
+      "label": "SCADA / HMI 主站",
+      "sublabel": "Modbus 客户端",
+      "pos": [
+        40,
+        285
+      ],
+      "size": [
+        150,
+        70
+      ]
+    },
+    {
+      "id": "tcp",
+      "type": "backend",
+      "label": "Modbus TCP",
+      "sublabel": "server :502 · MBAP",
+      "tag": "ethernet_task",
+      "pos": [
+        310,
+        140
+      ],
+      "size": [
+        160,
+        70
+      ]
+    },
+    {
+      "id": "rtu",
+      "type": "backend",
+      "label": "Modbus RTU",
+      "sublabel": "slave · USART2 · DE/RE",
+      "tag": "rs485_task",
+      "pos": [
+        310,
+        430
+      ],
+      "size": [
+        160,
+        70
+      ]
+    },
+    {
+      "id": "core",
+      "type": "backend",
+      "label": "Modbus 协议核心",
+      "sublabel": "CRC16 · 地址过滤 · 功能码",
+      "tag": "modbus.c",
+      "pos": [
+        570,
+        285
+      ],
+      "size": [
+        170,
+        70
+      ]
+    },
+    {
+      "id": "regs",
+      "type": "database",
+      "label": "寄存器表",
+      "sublabel": "coils / holding / input",
+      "tag": "数据枢纽",
+      "pos": [
+        820,
+        285
+      ],
+      "size": [
+        160,
+        70
+      ]
+    },
+    {
+      "id": "dio",
+      "type": "backend",
+      "label": "数字量 IO",
+      "sublabel": "8DI 光耦消抖 · 8DO",
+      "pos": [
+        1060,
+        120
+      ],
+      "size": [
+        160,
+        70
+      ]
+    },
+    {
+      "id": "relay",
+      "type": "backend",
+      "label": "继电器 ×4",
+      "sublabel": "BSRR 驱动 · LED 联动",
+      "pos": [
+        1060,
+        285
+      ],
+      "size": [
+        160,
+        70
+      ]
+    },
+    {
+      "id": "aio",
+      "type": "backend",
+      "label": "模拟量 IO",
+      "sublabel": "4AI ADC12 · 2AO DAC12",
+      "pos": [
+        1060,
+        450
+      ],
+      "size": [
+        160,
+        70
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "STM32F407 · FreeRTOS",
+      "wraps": [
+        "tcp",
+        "rtu",
+        "core",
+        "regs",
+        "dio",
+        "relay",
+        "aio"
+      ]
+    },
+    {
+      "kind": "security-group",
+      "label": "现场隔离边界（光耦 / 功率驱动）",
+      "wraps": [
+        "dio",
+        "relay",
+        "aio"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "scada-tcp",
+      "from": "scada",
+      "to": "tcp",
+      "label": "Modbus TCP :502",
+      "variant": "emphasis"
+    },
+    {
+      "id": "scada-rtu",
+      "from": "scada",
+      "to": "rtu",
+      "label": "Modbus RTU · 差分总线",
+      "variant": "emphasis"
+    },
+    {
+      "id": "tcp-core",
+      "from": "tcp",
+      "to": "core",
+      "label": "剥离 MBAP · PDU 复用"
+    },
+    {
+      "id": "rtu-core",
+      "from": "rtu",
+      "to": "core",
+      "label": "帧解析"
+    },
+    {
+      "id": "core-regs",
+      "from": "core",
+      "to": "regs",
+      "label": "读写寄存器"
+    },
+    {
+      "id": "regs-dio",
+      "from": "regs",
+      "to": "dio"
+    },
+    {
+      "id": "regs-relay",
+      "from": "regs",
+      "to": "relay",
+      "label": "modbus_sync 10ms",
+      "labelAt": [
+        1100,
+        369
+      ]
+    },
+    {
+      "id": "regs-aio",
+      "from": "regs",
+      "to": "aio"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "通信双链路",
+      "items": [
+        "TCP 与 RTU 共用同一个协议核心",
+        "TCP 收到请求后剥离 MBAP 复用 RTU 处理器",
+        "两条链路可同时服务不同主站"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "数据枢纽",
+      "items": [
+        "寄存器表是全板唯一的 IO 状态中心",
+        "io_scan 任务 10ms 周期调用 modbus_sync_registers",
+        "上位机读写全部映射到 Modbus 寄存器地址"
+      ]
+    },
+    {
+      "dot": "rose",
+      "title": "隔离与可靠",
+      "items": [
+        "DI 光耦隔离 + 软件消抖，现场侧独立边界",
+        "RS485 半双工 DE/RE 方向控制",
+        "CRC16 查表校验 + 从机地址过滤，校验失败静默"
+      ]
+    }
+  ]
+}
