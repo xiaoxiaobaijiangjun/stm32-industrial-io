@@ -1,13 +1,23 @@
 #include "main.h"
+#include "FreeRTOS.h"
+#include "task.h"
 
 volatile uint32_t sys_tick = 0;
+
+extern void xPortSysTickHandler(void);
 
 static void rs485_modbus_rx_callback(uint8_t *data, uint16_t len);
 static void eth_modbus_callback(uint8_t *data, uint16_t len);
 
+static void io_scan_task(void *arg);
+static void rs485_task(void *arg);
+static void ethernet_task(void *arg);
+
 void SysTick_Handler(void)
 {
-    sys_tick++;
+    if (xTaskGetSchedulerState() != taskSCHEDULER_NOT_STARTED) {
+        xPortSysTickHandler();
+    }
 }
 
 uint32_t HAL_GetTick(void)
@@ -17,10 +27,31 @@ uint32_t HAL_GetTick(void)
 
 void HAL_Delay(uint32_t delay)
 {
-    uint32_t tickstart = sys_tick;
-    while ((sys_tick - tickstart) < delay) {
-        __WFI();
+    if (xTaskGetSchedulerState() == taskSCHEDULER_RUNNING) {
+        vTaskDelay(pdMS_TO_TICKS(delay));
+    } else {
+        uint32_t tickstart = sys_tick;
+        while ((sys_tick - tickstart) < delay) {
+            __WFI();
+        }
     }
+}
+
+void vApplicationTickHook(void)
+{
+    sys_tick++;
+}
+
+void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName)
+{
+    (void)xTask;
+    (void)pcTaskName;
+    while (1);
+}
+
+void vApplicationMallocFailedHook(void)
+{
+    while (1);
 }
 
 void system_clock_config(void)
@@ -55,10 +86,8 @@ int main(void)
     HAL_Init();
     system_clock_config();
 
-    /* Configure SysTick */
     SysTick_Config(SystemCoreClock / 1000);
 
-    /* Initialize all peripherals */
     digital_inputs_init();
     digital_outputs_init();
     relays_init();
@@ -67,43 +96,59 @@ int main(void)
     rs485_init(RS485_BAUDRATE);
     ethernet_init();
 
-    /* Initialize Modbus stacks */
     modbus_rtu_init(MODBUS_RTU_ADDRESS);
     modbus_tcp_init(MODBUS_SLAVE_ID);
 
-    /* Set callback handlers */
     rs485_set_rx_callback(rs485_modbus_rx_callback);
     ethernet_set_rx_callback(eth_modbus_callback);
 
-    /* Set initial analog output to 0V */
     analog_output_write_voltage(0, 0.0f);
     analog_output_write_voltage(1, 0.0f);
 
-    /* Main control loop */
-    uint32_t last_scan_tick = 0;
+    xTaskCreate(io_scan_task,    "IO_Scan",  512,  NULL, 3, NULL);
+    xTaskCreate(rs485_task,      "RS485",    512,  NULL, 2, NULL);
+    xTaskCreate(ethernet_task,   "ETH",     1024,  NULL, 2, NULL);
 
-    while (1) {
-        uint32_t now = sys_tick;
+    vTaskStartScheduler();
 
-        /* Scan inputs every 10ms */
-        if ((now - last_scan_tick) >= 10) {
-            last_scan_tick = now;
-            digital_inputs_scan();
+    while (1);
+}
 
-            uint16_t ai_buf[AI_COUNT];
-            analog_inputs_scan_all(ai_buf);
-            for (uint8_t i = 0; i < AI_COUNT; i++) {
-                modbus_write_holding_register(MODBUS_HOLDING_REG_OFFSET + 100 + i, ai_buf[i]);
-            }
+static void io_scan_task(void *arg)
+{
+    (void)arg;
+    TickType_t last_wake = xTaskGetTickCount();
+
+    for (;;) {
+        digital_inputs_scan();
+
+        uint16_t ai_buf[AI_COUNT];
+        analog_inputs_scan_all(ai_buf);
+        for (uint8_t i = 0; i < AI_COUNT; i++) {
+            modbus_write_holding_register(MODBUS_HOLDING_REG_OFFSET + 100 + i, ai_buf[i]);
         }
 
-        /* Process RS485 (handled via interrupt + callback) */
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(10));
+    }
+}
+
+static void rs485_task(void *arg)
+{
+    (void)arg;
+
+    for (;;) {
         rs485_process();
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+}
 
-        /* Process Ethernet frames */
+static void ethernet_task(void *arg)
+{
+    (void)arg;
+
+    for (;;) {
         ethernet_process();
-
-        /* Watchdog / heartbeat could go here */
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
 
@@ -137,6 +182,4 @@ void HardFault_Handler(void) { while (1); }
 void MemManage_Handler(void) { while (1); }
 void BusFault_Handler(void) { while (1); }
 void UsageFault_Handler(void) { while (1); }
-void SVC_Handler(void) {}
 void DebugMon_Handler(void) {}
-void PendSV_Handler(void) {}

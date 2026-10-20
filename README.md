@@ -146,3 +146,11 @@ openocd -f openocd.cfg -c "program build/stm32_automation_board.hex verify reset
 ## License
 
 MIT
+
+---
+
+## 相关
+
+- [[RESUME_SUMMARY]] ——工程 README（功能/引脚/寄存器）与简历归纳同仓库两用
+- [[控制板讲稿]] ——讲稿开篇注明素材来自本工程归纳，架构段事实核对处
+- [[控制板问答笔记]] ——问答笔记源材料链到本工程的任务架构/寄存器映射

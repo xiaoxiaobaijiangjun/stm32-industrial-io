@@ -5,6 +5,7 @@ static uint8_t rx_buffer[RS485_BUFFER_SIZE];
 static volatile uint16_t rx_head = 0;
 static volatile uint16_t rx_tail = 0;
 static rs485_rx_callback_t rx_callback = NULL;
+static volatile uint8_t frame_ready = 0;
 
 void rs485_init(uint32_t baudrate)
 {
@@ -40,8 +41,13 @@ void rs485_init(uint32_t baudrate)
 
     rx_head = 0;
     rx_tail = 0;
+    frame_ready = 0;
 
     __HAL_UART_ENABLE_IT(&huart_rs485, UART_IT_RXNE);
+    /* 帧结束判定：使能 UART 空闲中断，线路空闲一个字节时间后置位 IDLE，
+     * 任务层据此知道一帧数据已收完，避免按固定字节数切帧导致的拆帧丢包。 */
+    __HAL_UART_CLEAR_IDLEFLAG(&huart_rs485);
+    __HAL_UART_ENABLE_IT(&huart_rs485, UART_IT_IDLE);
     HAL_NVIC_SetPriority(USART2_IRQn, 1, 0);
     HAL_NVIC_EnableIRQ(USART2_IRQn);
 }
@@ -98,6 +104,7 @@ void rs485_flush_rx(void)
     __disable_irq();
     rx_head = 0;
     rx_tail = 0;
+    frame_ready = 0;
     __enable_irq();
 }
 
@@ -108,6 +115,17 @@ void rs485_set_rx_callback(rs485_rx_callback_t callback)
 
 void rs485_process(void)
 {
+    /* 取走并清除帧就绪标志（临界区防止与中断竞争） */
+    __disable_irq();
+    uint8_t ready = frame_ready;
+    frame_ready = 0;
+    __enable_irq();
+
+    if (!ready) {
+        return;
+    }
+
+    /* 最短合法 Modbus RTU 帧为 8 字节，不足 8 字节视为线路噪声，丢弃 */
     if (rx_callback && rs485_bytes_available() >= 8) {
         uint8_t tmp[RS485_BUFFER_SIZE];
         uint16_t len = rs485_read(tmp, RS485_BUFFER_SIZE);
@@ -126,6 +144,10 @@ void USART2_IRQHandler(void)
             rx_buffer[rx_head] = byte;
             rx_head = next_head;
         }
+    }
+    if (__HAL_UART_GET_FLAG(&huart_rs485, UART_FLAG_IDLE)) {
+        __HAL_UART_CLEAR_IDLEFLAG(&huart_rs485);
+        frame_ready = 1;
     }
     HAL_UART_IRQHandler(&huart_rs485);
 }
